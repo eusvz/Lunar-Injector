@@ -1,34 +1,43 @@
 package app.lunar.injector
+import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.Unpooled
+import io.netty.channel.Channel
+import io.netty.channel.nio.NioEventLoopGroup
+import io.netty.channel.socket.nio.NioDatagramChannel
+import org.cloudburstmc.netty.channel.raknet.RakChannelFactory
+import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption
 import org.cloudburstmc.protocol.bedrock.BedrockPong
 import org.cloudburstmc.protocol.bedrock.BedrockServerSession
 import org.cloudburstmc.protocol.bedrock.codec.v2193.Bedrock_v2193
 import org.cloudburstmc.protocol.bedrock.data.PacketCompressionAlgorithm
+import org.cloudburstmc.protocol.bedrock.data.ResourcePackType
+import org.cloudburstmc.protocol.bedrock.netty.initializer.BedrockServerInitializer
 import org.cloudburstmc.protocol.bedrock.packet.*
-import org.cloudburstmc.protocol.bedrock.BedrockServer
-import org.cloudburstmc.protocol.bedrock.BedrockServerEventHandler
 import org.cloudburstmc.protocol.common.PacketSignal
 import java.net.InetSocketAddress
 
-/** LAN server: advertises itself, pushes packs to the joining console, then transfers it to the real server. */
 class LunarServer(private val packs: List<Pack>, private val host: String, private val port: Int) {
   private val codec = Bedrock_v2193.CODEC
-  private var server: BedrockServer? = null
+  private var group: NioEventLoopGroup? = null
+  private var channel: Channel? = null
   private val chunk = 128 * 1024
 
   fun start() {
     val pong = BedrockPong().edition("MCPE").motd("Lunar Injector").subMotd("Join to load packs")
       .playerCount(0).maximumPlayerCount(10).gameType("Survival").nintendoLimited(false)
-      .protocolVersion(codec.protocolVersion).version(codec.minecraftVersion).ipv4Port(19132).ipv6Port(19132)
-    val s = BedrockServer(InetSocketAddress("0.0.0.0", 19132))
-    s.handler = object : BedrockServerEventHandler {
-      override fun onConnectionRequest(a: InetSocketAddress, r: InetSocketAddress) = true
-      override fun onQuery(a: InetSocketAddress) = pong
-      override fun onSessionCreation(session: BedrockServerSession) { session.packetHandler = Handler(session) }
-    }
-    s.bind().join(); server = s
+      .protocolVersion(codec.protocolVersion).version(codec.minecraftVersion)
+      .ipv4Port(19132).ipv6Port(19132).serverId(System.nanoTime())
+    val g = NioEventLoopGroup(); group = g
+    channel = ServerBootstrap()
+      .channelFactory(RakChannelFactory.server(NioDatagramChannel::class.java))
+      .group(g)
+      .option(RakChannelOption.RAK_ADVERTISEMENT, pong.toByteBuf())
+      .childHandler(object : BedrockServerInitializer() {
+        override fun initSession(session: BedrockServerSession) { session.packetHandler = Handler(session) }
+      })
+      .bind(InetSocketAddress("0.0.0.0", 19132)).syncUninterruptibly().channel()
   }
-  fun stop() { server?.close() }
+  fun stop() { channel?.close(); group?.shutdownGracefully() }
 
   private inner class Handler(val s: BedrockServerSession) : BedrockPacketHandler {
     override fun handle(p: RequestNetworkSettingsPacket): PacketSignal {
@@ -41,8 +50,8 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     override fun handle(p: LoginPacket): PacketSignal {
       s.sendPacket(PlayStatusPacket().apply { status = PlayStatusPacket.Status.LOGIN_SUCCESS })
       s.sendPacket(ResourcePacksInfoPacket().apply {
-        forcedToAccept = true
-        packs.forEach { resourcePackInfos.add(ResourcePacksInfoPacket.Entry(it.uuid, it.version, it.bytes.size.toLong(), "", "", it.id, false, false)) }
+        isForcedToAccept = true
+        packs.forEach { resourcePackInfos.add(ResourcePacksInfoPacket.Entry(it.uuid, it.version, it.bytes.size.toLong(), "", "", it.id, false, false, false, "")) }
       })
       return PacketSignal.HANDLED
     }
@@ -59,9 +68,8 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
         ResourcePackClientResponsePacket.Status.HAVE_ALL_PACKS -> s.sendPacket(ResourcePackStackPacket().apply {
           isForcedToAccept = true; gameVersion = codec.minecraftVersion
           packs.forEach { resourcePacks.add(ResourcePackStackPacket.Entry(it.id, it.version, "")) } })
-        ResourcePackClientResponsePacket.Status.COMPLETED -> {
+        ResourcePackClientResponsePacket.Status.COMPLETED ->
           s.sendPacket(TransferPacket().apply { address = host; port = this@LunarServer.port })
-        }
         else -> {}
       }
       return PacketSignal.HANDLED
