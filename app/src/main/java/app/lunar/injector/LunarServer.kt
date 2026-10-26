@@ -1,7 +1,7 @@
 package app.lunar.injector
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.Unpooled
-import io.netty.channel.Channel
+import io.netty.channel.*
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.nio.NioDatagramChannel
 import org.cloudburstmc.netty.channel.raknet.RakChannelFactory
@@ -15,6 +15,7 @@ import org.cloudburstmc.protocol.bedrock.netty.initializer.BedrockServerInitiali
 import org.cloudburstmc.protocol.bedrock.packet.*
 import org.cloudburstmc.protocol.common.PacketSignal
 import java.net.InetSocketAddress
+import java.util.UUID
 
 class LunarServer(private val packs: List<Pack>, private val host: String, private val port: Int) {
   private val codec = Bedrock_v2193.CODEC
@@ -23,7 +24,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
   private val chunk = 128 * 1024
 
   private fun log(m: String) {
-    LunarState.error.value = (LunarState.error.value.orEmpty() + "\n" + m).trim().lines().takeLast(8).joinToString("\n")
+    LunarState.error.value = (LunarState.error.value.orEmpty() + "\n" + m).trim().lines().takeLast(10).joinToString("\n")
   }
   private fun safe(name: String, f: () -> Unit): PacketSignal {
     try { f() } catch (e: Throwable) { log("ERR $name: ${e.javaClass.simpleName} ${e.message}") }
@@ -41,7 +42,19 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
       .group(g)
       .option(RakChannelOption.RAK_ADVERTISEMENT, pong.toByteBuf())
       .childHandler(object : BedrockServerInitializer() {
-        override fun initSession(session: BedrockServerSession) { log("session created"); session.packetHandler = Handler(session) }
+        override fun initSession(session: BedrockServerSession) {
+          log("session created")
+          session.packetHandler = Handler(session)
+          session.peer.channel.pipeline().addLast(object : ChannelDuplexHandler() {
+            override fun write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise) {
+              promise.addListener(ChannelFutureListener { f -> if (!f.isSuccess) log("SEND FAIL: ${f.cause()}") })
+              ctx.write(msg, promise)
+            }
+            override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
+              log("IN ERR: $cause"); ctx.fireExceptionCaught(cause)
+            }
+          })
+        }
       })
       .bind(InetSocketAddress("0.0.0.0", 19132)).syncUninterruptibly().channel()
   }
@@ -60,6 +73,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
       s.sendPacket(PlayStatusPacket().apply { status = PlayStatusPacket.Status.LOGIN_SUCCESS })
       s.sendPacket(ResourcePacksInfoPacket().apply {
         isForcedToAccept = true
+        worldTemplateId = UUID(0, 0); worldTemplateVersion = ""
         packs.forEach { resourcePackInfos.add(ResourcePacksInfoPacket.Entry(it.uuid, it.version, it.bytes.size.toLong(), "", "", it.id, false, false, false, "")) }
       })
       log("3 sent packs info (${packs.size})")
