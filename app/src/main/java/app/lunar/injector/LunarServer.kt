@@ -94,12 +94,15 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
         ResourcePackClientResponsePacket.Status.HAVE_ALL_PACKS -> {
           s.sendPacket(ResourcePackStackPacket().apply {
             isForcedToAccept = true; gameVersion = codec.minecraftVersion
-            packs.forEach { resourcePacks.add(ResourcePackStackPacket.Entry(it.id, it.version, "")) } })
+            packs.asReversed().forEach { resourcePacks.add(ResourcePackStackPacket.Entry(it.id, it.version, "")) } })
           log("7 sent stack")
         }
         ResourcePackClientResponsePacket.Status.COMPLETED -> {
-          s.sendPacket(TransferPacket().apply { address = host; port = this@LunarServer.port })
-          log("8 transfer sent to $host:$port")
+          val ip = try { java.net.InetAddress.getAllByName(host).firstOrNull { it is java.net.Inet4Address }?.hostAddress ?: host } catch (e: Exception) { host }
+          s.peer.channel.eventLoop().schedule(Runnable {
+            s.sendPacket(TransferPacket().apply { address = ip; port = this@LunarServer.port })
+            log("8 transfer sent to $ip:${this@LunarServer.port}")
+          }, 800, java.util.concurrent.TimeUnit.MILLISECONDS)
         }
         else -> {}
       }
