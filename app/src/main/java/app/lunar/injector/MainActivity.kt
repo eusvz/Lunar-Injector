@@ -20,7 +20,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -40,12 +39,17 @@ class MainActivity : ComponentActivity() {
     val packs by LunarState.packs.collectAsState(); val live by LunarState.running.collectAsState()
     val err by LunarState.error.collectAsState()
     var addr by remember { mutableStateOf("") }; var msg by remember { mutableStateOf<String?>(null) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u: Uri? ->
-      u ?: return@rememberLauncherForActivityResult
-      val f = File(dir, "${System.currentTimeMillis()}.zip")
-      contentResolver.openInputStream(u)?.use { i -> f.outputStream().use { i.copyTo(it) } }
-      val p = Pack.load(f)
-      if (p == null) { f.delete(); msg = "Not a valid Bedrock resource pack" } else { LunarState.packs.value = packs + p; msg = null }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { us: List<Uri> ->
+      var list = LunarState.packs.value; msg = null
+      us.forEachIndexed { n, u ->
+        val f = File(dir, "${System.currentTimeMillis()}_$n.zip")
+        contentResolver.openInputStream(u)?.use { i -> f.outputStream().use { i.copyTo(it) } }
+        val p = Pack.load(f)
+        if (p == null) { f.delete(); msg = "Skipped a file that is not a Bedrock resource pack" }
+        else if (list.any { it.uuid == p.uuid }) { f.delete(); msg = "That pack is already added" }
+        else list = list + p
+      }
+      LunarState.packs.value = list
     }
     val pulse by rememberInfiniteTransition(label = "p").animateFloat(1f, if (live) 1.18f else 1.06f,
       infiniteRepeatable(tween(if (live) 900 else 2200, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "s")
@@ -75,7 +79,7 @@ class MainActivity : ComponentActivity() {
         }
       }
       AnimatedVisibility(live) { Text("Live. On your console open Friends and join \"Lunar Injector\".", color = Cyan, modifier = Modifier.padding(bottom = 8.dp)) }
-      err?.let { Text("Error: $it", color = Color(0xFFFCA5A5)) }
+      err?.let { Text("Log:\n$it", color = Color(0xFF94A3B8), fontSize = 12.sp) }
       Box(Modifier.fillMaxWidth().padding(bottom = 16.dp), contentAlignment = Alignment.Center) {
         Box(Modifier.size(96.dp).scale(pulse).background(Brush.linearGradient(listOf(Violet, Cyan)), CircleShape)
           .clickable(enabled = live || (addr.isNotBlank() && packs.isNotEmpty())) {
