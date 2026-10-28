@@ -57,16 +57,19 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
         f.isAccessible = true
         if (f.get(p) != null) continue
         val t = f.type
-        val v: Any? = when {
-          t == String::class.java -> ""
+        var v: Any? = when {
+          t == String::class.java || t == CharSequence::class.java -> if (f.name == "levelName") "Lunar Injector" else ""
           t == UUID::class.java -> UUID(0, 0)
           t == NbtMap::class.java -> NbtMap.EMPTY
-          List::class.java.isAssignableFrom(t) -> ArrayList<Any>()
-          t.isEnum -> t.enumConstants?.firstOrNull()
-          else -> runCatching { t.getMethod("empty").invoke(null) }.getOrNull()
-            ?: runCatching { t.getField("EMPTY").get(null) }.getOrNull()
+          else -> null
         }
-        if (v != null) { f.set(p, v); filled.add(f.name) } else log("null: ${f.name}")
+        if (v == null && t.isEnum) v = t.enumConstants?.firstOrNull()
+        if (v == null) v = runCatching { t.getField("EMPTY").get(null) }.getOrNull()
+        if (v == null) v = runCatching { t.getMethod("empty").invoke(null) }.getOrNull()
+        if (v == null && List::class.java.isAssignableFrom(t) && t.isAssignableFrom(ArrayList::class.java)) v = ArrayList<Any>()
+        if (v == null && !t.isInterface && !Modifier.isAbstract(t.modifiers))
+          v = runCatching { t.getDeclaredConstructor().apply { isAccessible = true }.newInstance() }.getOrNull()
+        if (v != null && t.isInstance(v)) { f.set(p, v); filled.add(f.name) } else log("null: ${f.name} (${t.simpleName})")
       } catch (e: Throwable) { log("fill ${f.name}: ${e.javaClass.simpleName}") }
     }
     if (filled.isNotEmpty()) log("filled " + filled.joinToString())
@@ -182,7 +185,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
               packId = k.uuid; packVersion = k.version; maxChunkSize = chunk.toLong()
               chunkCount = ((k.bytes.size + chunk - 1) / chunk).toLong()
               compressedPackSize = k.bytes.size.toLong(); hash = k.sha; type = ResourcePackType.RESOURCES })
-            log("5 sending pack ${k.name}")
+            log("5 sending ${k.name} ${k.bytes.size / 1024}KB")
           }
         }
         ResourcePackClientResponsePacket.Status.HAVE_ALL_PACKS -> {
@@ -202,10 +205,12 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     override fun handle(p: ResourcePackChunkRequestPacket) = safe("chunk") {
       val k = packs.find { it.uuid == p.packId }
       if (k == null) { log("chunk for unknown pack"); return@safe }
+      val n = (k.bytes.size + chunk - 1) / chunk
       val from = p.chunkIndex * chunk; val to = minOf(from + chunk, k.bytes.size)
       s.sendPacket(ResourcePackChunkDataPacket().apply {
         packId = k.uuid; packVersion = k.version; chunkIndex = p.chunkIndex
         progress = from.toLong(); data = Unpooled.wrappedBuffer(k.bytes, from, to - from) })
+      if (p.chunkIndex == 0 || p.chunkIndex % 10 == 0 || p.chunkIndex == n - 1) log("6 chunk ${p.chunkIndex}/${n - 1}")
     }
     override fun handle(p: RequestChunkRadiusPacket) = safe("radius") {
       s.sendPacket(ChunkRadiusUpdatedPacket().apply { radius = p.radius })
