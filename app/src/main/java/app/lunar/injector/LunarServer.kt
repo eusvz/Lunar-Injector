@@ -94,7 +94,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     isTexturePacksRequired = false
     defaultPlayerPermission = PlayerPermission.MEMBER
     serverChunkTickRange = 4
-    levelId = ""; levelName = "Lunar Injector"
+    levelId = ""
     premiumWorldTemplateId = ""
     multiplayerCorrelationId = ""
     vanillaVersion = "*"
