@@ -14,7 +14,6 @@ import org.cloudburstmc.protocol.bedrock.BedrockPong
 import org.cloudburstmc.protocol.bedrock.BedrockServerSession
 import org.cloudburstmc.protocol.bedrock.codec.BedrockCodec
 import org.cloudburstmc.protocol.bedrock.codec.v2193.Bedrock_v2193
-import org.cloudburstmc.protocol.bedrock.codec.v2225.Bedrock_v2225
 import org.cloudburstmc.protocol.bedrock.data.GamePublishSetting
 import org.cloudburstmc.protocol.bedrock.data.GameType
 import org.cloudburstmc.protocol.bedrock.data.PacketCompressionAlgorithm
@@ -32,8 +31,10 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class LunarServer(private val packs: List<Pack>, private val host: String, private val port: Int) {
-  private val latest: BedrockCodec = Bedrock_v2225.CODEC
   private val older: BedrockCodec = Bedrock_v2193.CODEC
+  private val latest: BedrockCodec = try {
+    Class.forName("org.cloudburstmc.protocol.bedrock.codec.v2225.Bedrock_v2225").getField("CODEC").get(null) as BedrockCodec
+  } catch (e: Throwable) { older }
   private var group: NioEventLoopGroup? = null
   private var channel: Channel? = null
   private val chunk = 128 * 1024
@@ -73,7 +74,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
 
   fun start() {
     ip = try { InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }?.hostAddress ?: host } catch (e: Exception) { host }
-    log("target $host -> $ip:$port")
+    log("target $host -> $ip:$port, codec ${latest.protocolVersion}")
     val pong = BedrockPong().edition("MCPE").motd("Lunar Injector").subMotd("Join to load packs")
       .playerCount(0).maximumPlayerCount(10).gameType("Survival").nintendoLimited(false)
       .protocolVersion(latest.protocolVersion).version(latest.minecraftVersion)
