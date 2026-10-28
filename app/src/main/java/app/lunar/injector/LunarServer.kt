@@ -12,7 +12,9 @@ import org.cloudburstmc.netty.channel.raknet.RakChannelFactory
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption
 import org.cloudburstmc.protocol.bedrock.BedrockPong
 import org.cloudburstmc.protocol.bedrock.BedrockServerSession
+import org.cloudburstmc.protocol.bedrock.codec.BedrockCodec
 import org.cloudburstmc.protocol.bedrock.codec.v2193.Bedrock_v2193
+import org.cloudburstmc.protocol.bedrock.codec.v2225.Bedrock_v2225
 import org.cloudburstmc.protocol.bedrock.data.GamePublishSetting
 import org.cloudburstmc.protocol.bedrock.data.GameType
 import org.cloudburstmc.protocol.bedrock.data.PacketCompressionAlgorithm
@@ -22,6 +24,7 @@ import org.cloudburstmc.protocol.bedrock.data.SpawnBiomeType
 import org.cloudburstmc.protocol.bedrock.netty.initializer.BedrockServerInitializer
 import org.cloudburstmc.protocol.bedrock.packet.*
 import org.cloudburstmc.protocol.common.PacketSignal
+import java.lang.reflect.Modifier
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -29,7 +32,8 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class LunarServer(private val packs: List<Pack>, private val host: String, private val port: Int) {
-  private val codec = Bedrock_v2193.CODEC
+  private val latest: BedrockCodec = Bedrock_v2225.CODEC
+  private val older: BedrockCodec = Bedrock_v2193.CODEC
   private var group: NioEventLoopGroup? = null
   private var channel: Channel? = null
   private val chunk = 128 * 1024
@@ -43,12 +47,36 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     return PacketSignal.HANDLED
   }
 
+  /** Fills any empty (null) field of a packet so the library can write it. */
+  private fun fillNulls(p: Any) {
+    val filled = ArrayList<String>()
+    for (f in p.javaClass.declaredFields) {
+      if (Modifier.isStatic(f.modifiers) || f.type.isPrimitive) continue
+      try {
+        f.isAccessible = true
+        if (f.get(p) != null) continue
+        val t = f.type
+        val v: Any? = when {
+          t == String::class.java -> ""
+          t == UUID::class.java -> UUID(0, 0)
+          t == NbtMap::class.java -> NbtMap.EMPTY
+          List::class.java.isAssignableFrom(t) -> ArrayList<Any>()
+          t.isEnum -> t.enumConstants?.firstOrNull()
+          else -> runCatching { t.getMethod("empty").invoke(null) }.getOrNull()
+            ?: runCatching { t.getField("EMPTY").get(null) }.getOrNull()
+        }
+        if (v != null) { f.set(p, v); filled.add(f.name) } else log("null: ${f.name}")
+      } catch (e: Throwable) { log("fill ${f.name}: ${e.javaClass.simpleName}") }
+    }
+    if (filled.isNotEmpty()) log("filled " + filled.joinToString())
+  }
+
   fun start() {
     ip = try { InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }?.hostAddress ?: host } catch (e: Exception) { host }
     log("target $host -> $ip:$port")
     val pong = BedrockPong().edition("MCPE").motd("Lunar Injector").subMotd("Join to load packs")
       .playerCount(0).maximumPlayerCount(10).gameType("Survival").nintendoLimited(false)
-      .protocolVersion(codec.protocolVersion).version(codec.minecraftVersion)
+      .protocolVersion(latest.protocolVersion).version(latest.minecraftVersion)
       .ipv4Port(19132).ipv6Port(19132).serverId(System.nanoTime())
     val g = NioEventLoopGroup(); group = g
     channel = ServerBootstrap()
@@ -112,9 +140,11 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     playerPropertyData = NbtMap.EMPTY
     worldTemplateId = UUID(0, 0)
     isInventoriesServerAuthoritative = true
+    fillNulls(this)
   }
 
   private inner class Handler(val s: BedrockServerSession) : BedrockPacketHandler {
+    private var cd: BedrockCodec = latest
     private var transferred = false
     private fun transfer(why: String) {
       if (transferred) return
@@ -125,7 +155,8 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
 
     override fun handle(p: RequestNetworkSettingsPacket) = safe("settings") {
       log("1 network settings, client protocol ${p.protocolVersion}")
-      s.codec = codec
+      cd = if (p.protocolVersion >= latest.protocolVersion) latest else older
+      s.codec = cd
       s.sendPacketImmediately(NetworkSettingsPacket().apply {
         compressionThreshold = 0; compressionAlgorithm = PacketCompressionAlgorithm.ZLIB })
       s.setCompression(PacketCompressionAlgorithm.ZLIB)
@@ -155,7 +186,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
         }
         ResourcePackClientResponsePacket.Status.HAVE_ALL_PACKS -> {
           s.sendPacket(ResourcePackStackPacket().apply {
-            isForcedToAccept = true; gameVersion = codec.minecraftVersion
+            isForcedToAccept = true; gameVersion = cd.minecraftVersion
             packs.asReversed().forEach { resourcePacks.add(ResourcePackStackPacket.Entry(it.id, it.version, "")) } })
           log("7 sent stack")
         }
