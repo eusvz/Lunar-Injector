@@ -18,6 +18,7 @@ import org.cloudburstmc.protocol.bedrock.data.GameType
 import org.cloudburstmc.protocol.bedrock.data.PacketCompressionAlgorithm
 import org.cloudburstmc.protocol.bedrock.data.PlayerPermission
 import org.cloudburstmc.protocol.bedrock.data.ResourcePackType
+import org.cloudburstmc.protocol.bedrock.data.SpawnBiomeType
 import org.cloudburstmc.protocol.bedrock.netty.initializer.BedrockServerInitializer
 import org.cloudburstmc.protocol.bedrock.packet.*
 import org.cloudburstmc.protocol.common.PacketSignal
@@ -35,10 +36,10 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
   @Volatile private var ip: String = host
 
   private fun log(m: String) {
-    LunarState.error.value = (LunarState.error.value.orEmpty() + "\n" + m).trim().lines().takeLast(12).joinToString("\n")
+    LunarState.error.value = (LunarState.error.value.orEmpty() + "\n" + m).trim().lines().takeLast(14).joinToString("\n")
   }
   private fun safe(name: String, f: () -> Unit): PacketSignal {
-    try { f() } catch (e: Throwable) { log("ERR $name: ${e.javaClass.simpleName} ${e.message}") }
+    try { f() } catch (e: Throwable) { log("ERR $name: ${e.javaClass.simpleName} ${e.message?.take(100)}") }
     return PacketSignal.HANDLED
   }
 
@@ -60,11 +61,17 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
           session.packetHandler = Handler(session)
           session.peer.channel.pipeline().addLast(object : ChannelDuplexHandler() {
             override fun write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise) {
-              promise.addListener(ChannelFutureListener { f -> if (!f.isSuccess) log("SEND FAIL: ${f.cause()}") })
+              promise.addListener(ChannelFutureListener { f ->
+                if (!f.isSuccess) {
+                  val root = generateSequence<Throwable>(f.cause()) { it.cause }.last()
+                  log("SEND FAIL root: ${root.javaClass.simpleName}: ${root.message?.take(80)}")
+                  log("at " + root.stackTrace.take(3).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" })
+                }
+              })
               ctx.write(msg, promise)
             }
             override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
-              log("IN ERR: $cause"); ctx.fireExceptionCaught(cause)
+              log("IN ERR: ${cause.toString().take(120)}"); ctx.fireExceptionCaught(cause)
             }
           })
         }
@@ -79,12 +86,15 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
     playerPosition = Vector3f.from(0f, 66f, 0f)
     rotation = Vector2f.ZERO
     seed = 0L
+    spawnBiomeType = SpawnBiomeType.DEFAULT
+    customBiomeName = ""
     dimensionId = 0
     generatorId = 1
     levelGameType = GameType.SURVIVAL
     difficulty = 0
     defaultSpawn = Vector3i.from(0, 66, 0)
     isAchievementsDisabled = true
+    educationProductionId = ""
     currentTick = 0
     rainLevel = 0f; lightningLevel = 0f
     isMultiplayerGame = true; isBroadcastingToLan = true
@@ -131,7 +141,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
       log("3 sent packs info (${packs.size})")
     }
     override fun handle(p: ResourcePackClientResponsePacket) = safe("response") {
-      log("4 client says ${p.status} ${p.packIds}")
+      log("4 client says ${p.status}")
       when (p.status) {
         ResourcePackClientResponsePacket.Status.SEND_PACKS -> p.packIds.forEach { id ->
           val k = packs.find { id.startsWith(it.id, true) }
@@ -140,7 +150,7 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
               packId = k.uuid; packVersion = k.version; maxChunkSize = chunk.toLong()
               chunkCount = ((k.bytes.size + chunk - 1) / chunk).toLong()
               compressedPackSize = k.bytes.size.toLong(); hash = k.sha; type = ResourcePackType.RESOURCES })
-            log("5 sent data info")
+            log("5 sending pack ${k.name}")
           }
         }
         ResourcePackClientResponsePacket.Status.HAVE_ALL_PACKS -> {
@@ -164,7 +174,6 @@ class LunarServer(private val packs: List<Pack>, private val host: String, priva
       s.sendPacket(ResourcePackChunkDataPacket().apply {
         packId = k.uuid; packVersion = k.version; chunkIndex = p.chunkIndex
         progress = from.toLong(); data = Unpooled.wrappedBuffer(k.bytes, from, to - from) })
-      log("6 chunk ${p.chunkIndex}")
     }
     override fun handle(p: RequestChunkRadiusPacket) = safe("radius") {
       s.sendPacket(ChunkRadiusUpdatedPacket().apply { radius = p.radius })
